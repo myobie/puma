@@ -32,6 +32,7 @@ module Puma
       @workers = []
 
       @auto_trim = nil
+      @timer_outer = nil
 
       @mutex.synchronize do
         @min.times { spawn_thread }
@@ -84,7 +85,7 @@ module Puma
               @waiting -= 1
             end
 
-            work = todo.shift if continue
+            work, created_at = todo.shift if continue
           end
 
           break unless continue
@@ -116,7 +117,7 @@ module Puma
           raise "Unable to add work while shutting down"
         end
 
-        @todo << work
+        @todo << [work, Time.now.utc]
 
         if @waiting < @todo.size and @spawned < @max
           spawn_thread
@@ -139,7 +140,15 @@ module Puma
       end
     end
 
-    class AutoTrim
+    def timeout_all_older_than(timeout_seconds)
+      @mutex.synchronize do
+        now = Time.now.utc
+        @todo.delete_if { |_, time| now - time > timeout_seconds }.
+                   each { |work, _| work.timeout! if work.respond_to?(:timeout!) }
+      end
+    end
+
+    class Worker
       def initialize(pool, timeout)
         @pool = pool
         @timeout = timeout
@@ -148,13 +157,11 @@ module Puma
 
       def start!
         @running = true
+        @thread = create_worker_thread
+      end
 
-        @thread = Thread.new do
-          while @running
-            @pool.trim
-            sleep @timeout
-          end
-        end
+      def create_worker_thread
+        raise NotImplementedError
       end
 
       def stop
@@ -163,9 +170,36 @@ module Puma
       end
     end
 
+    class AutoTrim < Worker
+      def create_worker_thread
+        Thread.new do
+          while @running
+            @pool.trim
+            sleep @timeout
+          end
+        end
+      end
+    end
+
+    class TimerOuter < Worker
+      def create_worker_thread
+        Thread.new do
+          while @running
+            @pool.timeout_all_older_than(@timeout)
+            sleep 1
+          end
+        end
+      end
+    end
+
     def auto_trim!(timeout=5)
       @auto_trim = AutoTrim.new(self, timeout)
       @auto_trim.start!
+    end
+
+    def timeout!(timeout = 15)
+      @timer_outer = TimerOuter.new(self, timeout)
+      @timer_outer.start!
     end
 
     # Tell all threads in the pool to exit and wait for them to finish.
@@ -176,6 +210,7 @@ module Puma
         @cond.broadcast
 
         @auto_trim.stop if @auto_trim
+        @timer_outer.stop if @timer_outer
       end
 
       # Use this instead of #each so that we don't stop in the middle

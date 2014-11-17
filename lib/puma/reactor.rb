@@ -8,6 +8,7 @@ module Puma
       @server = server
       @events = server.events
       @app_pool = app_pool
+      @max_queue_size = 1_000
 
       @mutex = Mutex.new
       @ready, @trigger = Puma::Util.pipe
@@ -70,7 +71,13 @@ module Puma
 
               begin
                 if c.try_to_finish
-                  @app_pool << c
+                  if @app_pool.size < @max_queue_size
+                    @app_pool << c
+                  else
+                    c.write_503
+                    c.close
+                  end
+
                   sockets.delete c
                 end
 

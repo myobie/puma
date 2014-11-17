@@ -285,5 +285,17 @@ module Puma
       rescue StandardError
       end
     end
+
+    def write_503
+      begin
+        @io << ERROR_503_RESPONSE
+      rescue StandardError
+      end
+    end
+
+    def timeout!
+      write_503
+      close
+    end
   end
 end
